@@ -5,3 +5,6 @@ __pycache__/
 .vscode/
 build/
 dist/
+
+*.db
+desktop.ini
