@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-200 antialiased selection:bg-indigo-500/30;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-slate-900/40 backdrop-blur-xl border border-white/10 shadow-2xl;
+  }
+  
+  .glass-morphism {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 hover:bg-white/10;
+  }
+
+  .btn-primary {
+    @apply px-6 py-3 bg-indigo-600 text-white rounded-xl font-semibold shadow-lg shadow-indigo-500/20 hover:bg-indigo-700 hover:shadow-indigo-500/40 transition-all active:scale-95;
+  }
+
+  .btn-secondary {
+    @apply px-6 py-3 bg-slate-800 text-slate-200 rounded-xl font-semibold border border-white/10 hover:bg-slate-700 transition-all active:scale-95;
+  }
+
+  .btn-accent {
+    @apply px-6 py-3 bg-amber-500 text-white rounded-xl font-semibold shadow-lg shadow-amber-500/20 hover:bg-amber-600 transition-all active:scale-95;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-indigo-500/20 rounded-full border-2 border-transparent bg-clip-padding hover:bg-indigo-500/40 transition-colors;
+}
+
+/* Smooth transitions */
+.page-enter {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 400ms, transform 400ms;
+}
+
+/* Gradient text */
+.text-gradient {
+  @apply bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-amber-400;
+}
