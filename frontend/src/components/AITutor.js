@@ -15,7 +15,6 @@ function AITutor({ onSelectTopic, user, onLogout }) {
 
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
-  const [currentTopic, setCurrentTopic] = useState("");
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
