@@ -137,20 +137,32 @@ function AITutor({ onSelectTopic, user, onLogout }) {
                   }`}>
                     <ReactMarkdown
                       components={{
-                        code({ node, inline, className, children, ...props }) {
+                        // react-markdown v9+/v10: the `inline` prop was removed.
+                        // Override `pre` as a passthrough so the default <pre> wrapper
+                        // doesn't double-nest with the <pre> we render in `code`.
+                        pre({ children }) {
+                          return <>{children}</>;
+                        },
+                        code({ node, className, children, ...props }) {
                           const match = /language-(\w+)/.exec(className || '');
-                          return !inline ? (
-                            <div className="relative group my-4">
-                              <div className="absolute -top-3 left-4 px-2 py-0.5 bg-slate-700 text-[10px] font-bold text-slate-300 rounded uppercase tracking-widest border border-white/5">
-                                {match ? match[1] : 'code'}
+                          // Block code: has a language- className, OR content is multiline
+                          const isBlock = !!match || String(children).includes('\n');
+                          if (isBlock) {
+                            return (
+                              <div className="relative group my-4">
+                                <div className="absolute -top-3 left-4 px-2 py-0.5 bg-slate-700 text-[10px] font-bold text-slate-300 rounded uppercase tracking-widest border border-white/5">
+                                  {match ? match[1] : 'code'}
+                                </div>
+                                <pre className="mt-2 bg-slate-950 p-6 rounded-2xl border border-white/5 overflow-x-auto shadow-2xl">
+                                  <code className="text-indigo-300 font-mono text-sm leading-relaxed whitespace-pre" {...props}>
+                                    {children}
+                                  </code>
+                                </pre>
                               </div>
-                              <pre className="mt-2 bg-slate-950 p-6 rounded-2xl border border-white/5 overflow-x-auto shadow-2xl">
-                                <code className="text-indigo-300 font-mono text-sm leading-relaxed whitespace-pre" {...props}>
-                                  {children}
-                                </code>
-                              </pre>
-                            </div>
-                          ) : (
+                            );
+                          }
+                          // Inline code: single backtick, no language class, single line
+                          return (
                             <code className="bg-slate-700/50 text-amber-300 px-1.5 py-0.5 rounded-md font-mono text-sm" {...props}>
                               {children}
                             </code>
@@ -162,6 +174,8 @@ function AITutor({ onSelectTopic, user, onLogout }) {
                         h1: ({children}) => <h1 className="text-2xl font-black mb-4 text-white tracking-tight">{children}</h1>,
                         h2: ({children}) => <h2 className="text-xl font-bold mb-3 text-indigo-300 tracking-tight">{children}</h2>,
                         h3: ({children}) => <h3 className="text-lg font-semibold mb-2 text-amber-200">{children}</h3>,
+                        strong: ({children}) => <strong className="font-bold text-white">{children}</strong>,
+                        em: ({children}) => <em className="italic text-slate-300">{children}</em>,
                       }}
                     >
                       {msg.content}

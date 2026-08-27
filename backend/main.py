@@ -1,4 +1,13 @@
 # main.py
+import sys
+import io
+
+# Fix Unicode/emoji output on Windows (cp1252 console can't handle emoji)
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', write_through=True)
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', write_through=True)
+
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,17 +19,23 @@ import os
 import json
 import random
 import hashlib
-from groq import Groq
+# from groq import Groq  # Kept for rollback reference; replaced by Gemini
+import google.generativeai as genai
 import httpx
 
 # ------------------ Load .env ------------------
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # Kept for rollback reference
+# groq_client = Groq(api_key=GROQ_API_KEY)  # Kept for rollback reference
+
+# ------------------ Gemini Setup ------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-3.1-flash-lite")
 
 # ------------------ Web Search Retrieval ------------------
 def retrieve_context(query: str) -> List[str]:
-    """
+    """1
     Retrieve search context from Tavily API (or Serper as fallback).
     Returns a list of strings representing search result snippets with sources.
     """
@@ -131,7 +146,7 @@ db.close()
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -422,30 +437,19 @@ Return ONLY a valid JSON array (no markdown, no extra text):
 
 🚀 Begin generating {num_questions} UNIQUE {selected_type['style'].lower()} questions now!"""
 
-            print(f"📤 Sending request (Retry {retry_attempt + 1}/{MAX_RETRIES})...")
+            print(f"📤 Sending request to Gemini (Retry {retry_attempt + 1}/{MAX_RETRIES})...")
             print(f"   Type: {selected_type['style']}")
             print(f"   Difficulty: {selected_difficulty['level']}")
             print(f"   Focus: {', '.join(selected_focuses)}")
             print(f"   Previous questions to avoid: {len(previous_questions)}")
-            
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"You are a creative quiz generator. Generate UNIQUE questions that are different from previous attempts. Current attempt: #{attempt}. Style: {selected_type['style']}"
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.95,  # ✅ MAXIMUM creativity
-                max_tokens=3000,
-                top_p=0.95,  # ✅ More diverse outputs
+
+            full_prompt = (
+                f"System: You are a creative quiz generator. Generate UNIQUE questions that are "
+                f"different from previous attempts. Current attempt: #{attempt}. Style: {selected_type['style']}\n\n"
+                f"User: {prompt}"
             )
-            
-            raw_text = response.choices[0].message.content.strip()
+            gemini_response = gemini_model.generate_content(full_prompt)
+            raw_text = gemini_response.text.strip()
             
             # Clean up response
             if raw_text.startswith("```json"):
@@ -504,7 +508,21 @@ Return ONLY a valid JSON array (no markdown, no extra text):
             if retry_attempt < MAX_RETRIES - 1:
                 seed = random.randint(1, 1000000)
         except Exception as e:
-            print(f"❌ Retry {retry_attempt + 1} - Error: {str(e)}")
+            error_msg = str(e)
+            print(f"❌ Retry {retry_attempt + 1} - Error: {error_msg}")
+            
+            # Catch Gemini-specific errors
+            if any(kw in error_msg.lower() for kw in ["quota", "rate", "resource_exhausted", "429"]):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit reached, please wait a moment and try again."
+                )
+            elif any(kw in error_msg.lower() for kw in ["api_key", "authentication", "invalid"]):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Invalid Gemini API key. Check GEMINI_API_KEY in your .env file."
+                )
+                
             import traceback
             traceback.print_exc()
     
@@ -533,47 +551,42 @@ async def ai_tutor(request: dict):
         print(f"\n=== AI TUTOR REQUEST ===")
         print(f"Question: {question}")
         print(f"Conversation history: {len(conversation_history)} messages")
-        
+
         # Validate inputs
         if not question or question.strip() == "":
             raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        if not GROQ_API_KEY:
-            print("❌ ERROR: GROQ_API_KEY not found")
+
+        if not GEMINI_API_KEY:
+            print("❌ ERROR: GEMINI_API_KEY not found")
             raise HTTPException(
-                status_code=500, 
-                detail="GROQ_API_KEY not configured. Please set it in .env file."
+                status_code=500,
+                detail="GEMINI_API_KEY not configured. Please set it in .env file."
             )
-        
-        # Build messages for Groq
-        messages = [
-            {
-                "role": "system", 
-                "content": """You are an expert AI Tutor and Senior Software Architect. Your goal is to help students learn complex topics with clarity and precision.
 
-Follow these pedagogical guidelines:
-1. **Always use Markdown** for formatting. Use bolding, bullet points, and numbered lists to structure your explanations.
-2. **Mandatory Code Blocks**: When providing code, ALWAYS use fenced code blocks with the appropriate language identifier (e.g., ```python, ```javascript).
-3. **Multi-line Formatting**: Ensure code is properly indented and has correct newlines. DO NOT send code as a single line.
-4. **Structured Explanations**: Start with a high-level overview, followed by detailed points, and end with a practical example or a "Quick Summary" section.
-5. **Friendly but Professional**: Be supportive and encouraging, but maintain the authority of an expert educator.
-6. **Conciseness vs Detail**: Don't be overly wordy, but ensure the core concept is fully explained. Use simple analogies for complex topics.
+        # System prompt
+        system_prompt = """You are an expert AI Tutor who explains topics clearly and conversationally, like a knowledgeable friend teaching a beginner.
 
-If you don't know the answer, admit it and suggest related topics to explore. Stay focused on educational and technical topics."""
-            }
-        ]
-        
-        # Add conversation history (for context)
-        for msg in conversation_history:
-            if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-        
-        # Retrieve web search context (RAG step)
+Guidelines:
+1. **Always open with a brief framing sentence or two** — before any bullets, headers, or details, give one or two plain-language sentences that orient the reader to what the topic is about. Never jump straight into a bullet list or header without this framing.
+2. **Use headers only when the content genuinely has multiple distinct sub-parts** that benefit from visual separation (e.g. a question covering 5–6 different patterns). Ask yourself: "does this response actually have multiple separate ideas?" If yes, use minimal clearly-labeled headers. If the answer is fundamentally one idea explained in a few paragraphs, use flowing prose with light bold for key terms — do NOT force headers onto a simple single-concept answer.
+3. **Be concise and direct.** Do NOT restate the question, add a lengthy preamble, or open with filler phrases like "Great question!" or "Sure, let me explain...". Prefer shorter paragraphs. For simple questions, a few focused paragraphs are enough.
+4. **Code example rule — this takes priority over all other formatting preferences:**
+   - ONLY include a code example when the question is DIRECTLY about a programming or software engineering concept. Examples where code IS appropriate: recursion, loops, sorting algorithms, data structures, binary search, two pointers, sliding window, OOP, functions, time/space complexity, APIs, databases, specific programming language features.
+   - NEVER include code for topics that are not fundamentally about programming or software. This includes — but is not limited to — science (biology, physics, chemistry, general science), history, mathematics concepts, geography, social studies, philosophy, arts, or any general knowledge topic, even if a programming analogy *could* be drawn. Do NOT introduce programming analogies with code in these cases.
+   - Also do NOT include code for topics that are merely adjacent to technology (like "AI news", "what companies use AI", "how does the internet work conceptually").
+   - When in doubt about whether the topic is truly a programming/CS topic, default to NO code.
+5. **When code IS included**, keep it short (one clear example), correctly tagged with the right language (e.g. \`\`\`python), and directly relevant to the specific question — never a generic/unrelated placeholder.
+6. **Be beginner-friendly.** Use simple analogies for complex topics. Avoid jargon without explanation.
+7. **Friendly but professional tone** — supportive and encouraging, while maintaining the authority of a real expert.
+
+If you don't know the answer, say so honestly and suggest related topics to explore."""
+
+        # Trim conversation history to last 6 messages to reduce token usage
+        recent_history = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+
+        # Retrieve web search context (RAG step — unchanged)
         search_results = retrieve_context(question)
-        
+
         if search_results:
             search_context_str = "\n\n".join(search_results)
             formatted_question = f"Using the following current information:\n{search_context_str}\n\nExplain {question} to a beginner. If the search results don't add anything beyond general knowledge, rely on your own understanding."
@@ -581,25 +594,25 @@ If you don't know the answer, admit it and suggest related topics to explore. St
         else:
             formatted_question = question
             print("📝 No search results retrieved. Falling back to default prompt.")
-        
-        # Add current question
-        messages.append({"role": "user", "content": formatted_question})
-        
-        print(f"📤 Sending {len(messages)} messages to Groq API...")
-        
-        # Call Groq API
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        answer = response.choices[0].message.content.strip()
-        
+
+        # Build single prompt string for Gemini (System + history + current question)
+        prompt_parts = [f"System: {system_prompt}"]
+        for msg in recent_history:
+            if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                role_label = "User" if msg["role"] == "user" else "Assistant"
+                prompt_parts.append(f"{role_label}: {msg['content']}")
+        prompt_parts.append(f"User: {formatted_question}")
+        full_prompt = "\n\n".join(prompt_parts)
+
+        print(f"📤 Sending prompt to Gemini API (history: {len(recent_history)} msgs)...")
+
+        # Call Gemini API
+        gemini_response = gemini_model.generate_content(full_prompt)
+        answer = gemini_response.text.strip()
+
         print(f"✅ Got response ({len(answer)} characters)")
         print(f"Preview: {answer[:100]}...")
-        
+
         return {
             "answer": answer,
             "question": question
@@ -610,23 +623,23 @@ If you don't know the answer, admit it and suggest related topics to explore. St
     except Exception as e:
         error_msg = str(e)
         print(f"❌ ERROR in ai_tutor: {error_msg}")
-        
-        # Handle specific errors
-        if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
+
+        # Gemini quota / rate-limit errors
+        if any(kw in error_msg.lower() for kw in ["quota", "rate", "resource_exhausted", "429"]):
             raise HTTPException(
-                status_code=500, 
-                detail="Invalid Groq API key. Get one from https://console.groq.com/keys"
+                status_code=429,
+                detail="Rate limit reached, please wait a moment and try again."
             )
-        elif "rate_limit" in error_msg.lower():
+        elif any(kw in error_msg.lower() for kw in ["api_key", "authentication", "invalid"]):
             raise HTTPException(
-                status_code=429, 
-                detail="Rate limit exceeded. Please wait and try again."
+                status_code=500,
+                detail="Invalid Gemini API key. Check GEMINI_API_KEY in your .env file."
             )
         else:
             import traceback
             traceback.print_exc()
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"AI Tutor error: {error_msg}"
             )
 
@@ -653,23 +666,21 @@ Provide brief, encouraging feedback (2-3 sentences) that:
 
 Be supportive and constructive."""
 
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=200
-        )
-        
-        feedback = response.choices[0].message.content.strip()
-        print(f"✅ Generated feedback")
-        
+        gemini_response = gemini_model.generate_content(prompt)
+        feedback = gemini_response.text.strip()
+        print(f"✅ Generated feedback via Gemini")
+
         return {"feedback": feedback}
     except Exception as e:
-        print(f"❌ Feedback error: {str(e)}")
-        # Fallback feedback if AI fails
-        if score / total >= 0.8:
+        error_msg = str(e)
+        print(f"❌ Feedback error: {error_msg}")
+        # Friendly rate-limit message
+        if any(kw in error_msg.lower() for kw in ["quota", "rate", "resource_exhausted", "429"]):
+            return {"feedback": "Rate limit reached, please wait a moment and try again."}
+        # Fallback feedback if Gemini fails for any other reason
+        if total > 0 and score / total >= 0.8:
             return {"feedback": "Excellent work! You have a strong understanding of this topic."}
-        elif score / total >= 0.6:
+        elif total > 0 and score / total >= 0.6:
             return {"feedback": "Good effort! Review the explanations and try again to improve."}
         else:
             return {"feedback": "Keep practicing! Review the material and take your time with each question."}
@@ -679,6 +690,7 @@ Be supportive and constructive."""
 def health():
     return {
         "status": "healthy",
-        "groq_api_configured": bool(GROQ_API_KEY),
+        "gemini_api_configured": bool(GEMINI_API_KEY),
+        "groq_api_kept_for_rollback": bool(GROQ_API_KEY),
         "database": "connected"
     }
