@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft, BookOpen, CheckCircle, XCircle, RefreshCcw, Send, Award, Brain } from "lucide-react";
 
+const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+
 function Quiz({ topic, user, onBackToTutor, onLogout }) {
   const [questions, setQuestions] = useState([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -25,7 +27,7 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
     setSelectedAnswer("");
 
     try {
-      const response = await fetch("http://localhost:8000/ai-questions", {
+      const response = await fetch(`${API_BASE_URL}/ai-questions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic, num_questions: 5, force_new: true }),

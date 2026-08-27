@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { motion } from "framer-motion";
 import { User, Mail, Lock, UserPlus, ArrowRight, CheckCircle, AlertCircle } from "lucide-react";
 
+const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+
 function Register({ onRegisterSuccess, onSwitchToLogin }) {
   const [formData, setFormData] = useState({
     name: "",
@@ -39,7 +41,7 @@ function Register({ onRegisterSuccess, onSwitchToLogin }) {
 
     setLoading(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/register", {
+      const res = await fetch(`${API_BASE_URL}/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

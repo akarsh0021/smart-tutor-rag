@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, LogOut, BookOpen, User, Bot, Sparkles, Brain } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
+const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+
 function AITutor({ onSelectTopic, user, onLogout }) {
   const [messages, setMessages] = useState([
     {
@@ -29,7 +31,7 @@ function AITutor({ onSelectTopic, user, onLogout }) {
     setLoading(true);
 
     try {
-      const response = await fetch("http://localhost:8000/ai-tutor", {
+      const response = await fetch(`${API_BASE_URL}/ai-tutor`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
