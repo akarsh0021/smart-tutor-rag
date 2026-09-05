@@ -1,5 +1,4 @@
-// src/App.js
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Login from "./components/Login";
 import Register from "./components/Register";
 import Quiz from "./components/Quiz";
@@ -8,7 +7,21 @@ import AITutor from "./components/AITutor";
 function App() {
   const [user, setUser] = useState(null);
   const [topic, setTopic] = useState("");
+  const [numQuestions, setNumQuestions] = useState(5);
+  const [questionType, setQuestionType] = useState("multiple_choice");
   const [showRegister, setShowRegister] = useState(false);
+  const [messages, setMessages] = useState([]);
+
+  useEffect(() => {
+    if (user && messages.length === 0) {
+      setMessages([
+        {
+          role: "assistant",
+          content: `Welcome **${user.name || user.username}**! 👋\n\nI'm your expert AI Tutor. How can I help you today?`,
+        },
+      ]);
+    }
+  }, [user, messages.length]);
 
   const handleLoginSuccess = (userData) => {
     setUser(userData);
@@ -23,11 +36,20 @@ function App() {
   const handleLogout = () => {
     setUser(null);
     setTopic("");
+    setNumQuestions(5);
+    setQuestionType("multiple_choice");
     setShowRegister(false);
+    setMessages([]);
   };
 
   const handleBackToTutor = () => {
     setTopic("");
+  };
+
+  const handleSelectTopic = (selectedTopic, count = 5, type = "multiple_choice") => {
+    setTopic(selectedTopic);
+    setNumQuestions(count);
+    setQuestionType(type);
   };
 
   const handleSwitchToRegister = () => {
@@ -62,15 +84,19 @@ function App() {
         ) : topic ? (
           <Quiz
             topic={topic}
+            numQuestions={numQuestions}
+            questionType={questionType}
             user={user}
             onBackToTutor={handleBackToTutor}
             onLogout={handleLogout}
           />
         ) : (
           <AITutor
-            onSelectTopic={(t) => setTopic(t)}
+            onSelectTopic={handleSelectTopic}
             user={user}
             onLogout={handleLogout}
+            messages={messages}
+            setMessages={setMessages}
           />
         )}
       </div>

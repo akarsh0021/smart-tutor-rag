@@ -19,6 +19,7 @@ import os
 import json
 import random
 import hashlib
+import time
 # from groq import Groq  # Kept for rollback reference; replaced by Gemini
 import google.generativeai as genai
 import httpx
@@ -126,6 +127,17 @@ class QuestionDB(Base):
     question = Column(String)
     answer = Column(String)
 
+class QuizAttemptDB(Base):
+    __tablename__ = "quiz_attempts"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True)
+    topic = Column(String, index=True)
+    question_type = Column(String)
+    difficulty = Column(String)
+    score = Column(Integer)
+    total = Column(Integer)
+    timestamp = Column(Integer)  # unix timestamp
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -172,6 +184,8 @@ class Topic(BaseModel):
     variation_prompt: Optional[str] = None
     request_id: Optional[str] = None
     force_new: Optional[bool] = False
+    question_type: Optional[str] = "multiple_choice"
+    user_id: Optional[int] = None
 
 # ------------------ Root Route ------------------
 @app.get("/")
@@ -263,6 +277,109 @@ def login(user: UserLogin):
 # Global cache to store recent questions (in production, use Redis/database)
 recent_questions_cache = {}
 
+# ------------------ Adaptive Difficulty Helper ------------------
+DIFFICULTY_ORDER = ["Easy", "Medium", "Hard"]
+
+def get_adaptive_difficulty(user_id: Optional[int], topic: str) -> dict:
+    """
+    Determine the appropriate difficulty level for a quiz based on the user's
+    recent attempts on the given topic. Shared across all question_types so that
+    MCQ and fill-in-blank history both count toward the same adaptive difficulty.
+
+    Rules:
+      - No prior attempts (or no user_id): return Easy
+      - Most recent attempt score >= 80% : increase difficulty (Easy→Medium→Hard)
+      - Most recent attempt score <= 40% : decrease difficulty (Hard→Medium→Easy)
+      - Otherwise                        : keep same difficulty as last attempt
+    """
+    difficulty_instructions = {
+        "Easy":   "Make questions straightforward with clear correct answers. Suitable for beginners.",
+        "Medium": "Make questions moderately challenging, requiring good understanding of the topic.",
+        "Hard":   "Make questions challenging and thought-provoking, requiring deep knowledge.",
+    }
+
+    def _build(level: str) -> dict:
+        return {"level": level, "instruction": difficulty_instructions[level]}
+
+    if user_id is None:
+        print(f"ℹ️  No user_id provided — defaulting to Easy")
+        return _build("Easy")
+
+    db = SessionLocal()
+    try:
+        # Fetch the 2 most-recent attempts for this user+topic (any question_type)
+        rows = db.execute(
+            select(QuizAttemptDB)
+            .where(QuizAttemptDB.user_id == user_id)
+            .where(QuizAttemptDB.topic == topic.strip().lower())
+            .order_by(QuizAttemptDB.timestamp.desc())
+            .limit(2)
+        ).scalars().all()
+
+        if not rows:
+            print(f"ℹ️  No prior attempts for user {user_id} on '{topic}' — starting at Easy")
+            return _build("Easy")
+
+        latest = rows[0]
+        percentage = (latest.score / latest.total * 100) if latest.total > 0 else 0
+        current_level = latest.difficulty if latest.difficulty in DIFFICULTY_ORDER else "Easy"
+        current_idx = DIFFICULTY_ORDER.index(current_level)
+
+        if percentage >= 80:
+            new_idx = min(current_idx + 1, len(DIFFICULTY_ORDER) - 1)
+        elif percentage <= 40:
+            new_idx = max(current_idx - 1, 0)
+        else:
+            new_idx = current_idx
+
+        new_level = DIFFICULTY_ORDER[new_idx]
+        print(f"📊 Adaptive difficulty for user {user_id} on '{topic}': "
+              f"last={current_level} ({percentage:.0f}%) → next={new_level}")
+        return _build(new_level)
+    finally:
+        db.close()
+
+# ------------------ Submit Quiz Result ------------------
+class QuizResult(BaseModel):
+    user_id: int
+    topic: str
+    question_type: str
+    difficulty: str
+    score: int
+    total: int
+
+@app.post("/submit-quiz-result")
+def submit_quiz_result(result: QuizResult):
+    db = SessionLocal()
+    try:
+        attempt = QuizAttemptDB(
+            user_id=result.user_id,
+            topic=result.topic.strip().lower(),
+            question_type=result.question_type,
+            difficulty=result.difficulty,
+            score=result.score,
+            total=result.total,
+            timestamp=int(time.time()),
+        )
+        db.add(attempt)
+        db.commit()
+        db.refresh(attempt)
+        percentage = round(result.score / result.total * 100) if result.total > 0 else 0
+        print(f"✅ Saved quiz result: user={result.user_id} topic='{result.topic}' "
+              f"type={result.question_type} diff={result.difficulty} "
+              f"score={result.score}/{result.total} ({percentage}%)")
+        return {
+            "message": "Result saved",
+            "id": attempt.id,
+            "percentage": percentage
+        }
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Error saving quiz result: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save result: {str(e)}")
+    finally:
+        db.close()
+
 @app.post("/ai-questions")
 def ai_questions(data: Topic):
     MAX_RETRIES = 3
@@ -272,13 +389,17 @@ def ai_questions(data: Topic):
     num_questions = data.num_questions or 5
     attempt = data.attempt or 1
     seed = data.seed or random.randint(1, 1000000)
-    
+    question_type = (data.question_type or "multiple_choice").strip().lower()
+    user_id = data.user_id
+
     print(f"\n{'='*70}")
     print(f"🎯 QUIZ GENERATION - ATTEMPT #{attempt}")
     print(f"{'='*70}")
     print(f"📚 Topic: {topic}")
     print(f"🔢 Seed: {seed}")
     print(f"🔄 Attempt: {attempt}")
+    print(f"📝 Question Type: {question_type}")
+    print(f"👤 User ID: {user_id}")
     print(f"{'='*70}\n")
     
     # ✅ MAXIMUM VARIATION STRATEGIES
@@ -328,26 +449,6 @@ def ai_questions(data: Topic):
         }
     ]
     
-    # Difficulty levels with specific instructions
-    difficulty_levels = [
-        {
-            "level": "Easy",
-            "instruction": "Make questions straightforward with clear correct answers. Suitable for beginners."
-        },
-        {
-            "level": "Medium",
-            "instruction": "Make questions moderately challenging, requiring good understanding of the topic."
-        },
-        {
-            "level": "Hard",
-            "instruction": "Make questions challenging and thought-provoking, requiring deep knowledge."
-        },
-        {
-            "level": "Mixed",
-            "instruction": "Include a mix of easy, medium, and hard questions."
-        }
-    ]
-    
     # Content focus areas
     focus_areas = [
         "syntax and structure",
@@ -362,10 +463,13 @@ def ai_questions(data: Topic):
         "industry standards"
     ]
     
-    # Select variation for this attempt (deterministic but different each time)
+    # Select question-style variation for this attempt (deterministic but different each time)
     selected_type = question_types[attempt % len(question_types)]
-    selected_difficulty = difficulty_levels[attempt % len(difficulty_levels)]
     selected_focuses = random.sample(focus_areas, k=min(3, len(focus_areas)))
+
+    # ✅ ADAPTIVE DIFFICULTY — shared across MCQ and fill-in-blank
+    selected_difficulty = get_adaptive_difficulty(user_id, topic)
+    print(f"📈 Difficulty selected: {selected_difficulty['level']}")
     
     # ✅ CHECK CACHE - Get previous questions to avoid repetition
     cache_key = topic.lower().replace(" ", "_")
@@ -386,8 +490,101 @@ def ai_questions(data: Topic):
     
     for retry_attempt in range(MAX_RETRIES):
         try:
-            # ✅ SUPER DETAILED PROMPT WITH MAXIMUM VARIATION
-            prompt = f"""🎯 QUIZ GENERATION REQUEST #{attempt}
+            if question_type == "fill_in_blank":
+                # ── FILL IN THE BLANK PROMPT ──────────────────────────────────
+                prompt = f"""🎯 FILL-IN-THE-BLANK GENERATION REQUEST #{attempt}
+
+**TOPIC:** {topic}
+
+**DIFFICULTY LEVEL:** {selected_difficulty['level']}
+{selected_difficulty['instruction']}
+
+**VARIATION REQUIREMENTS:**
+- This is generation attempt #{attempt}
+- Random seed: {seed}
+- Make sentences UNIQUE and CREATIVE
+- Cover diverse aspects of the topic
+{avoidance_text}
+
+**YOUR TASK:**
+Generate {num_questions} fill-in-the-blank questions about {topic}.
+
+**CRITICAL RULES:**
+1. Each sentence must have exactly ONE blank represented as ____
+2. The missing word or short phrase should be a KEY CONCEPT from the topic
+3. The correct_answer must be the exact word(s) that fill the blank
+4. Provide a helpful explanation for each answer
+5. Make sentences educational and clearly worded
+6. DO NOT repeat or paraphrase similar sentences
+7. Vary the style: definitions, facts, relationships, processes
+
+**OUTPUT FORMAT:**
+Return ONLY a valid JSON array (no markdown, no extra text):
+
+[
+  {{
+    "id": 1,
+    "question": "A sentence about {topic} with ____ as the missing term.",
+    "correct_answer": "missing term",
+    "explanation": "Brief explanation of why this answer is correct"
+  }}
+]
+
+🚀 Begin generating {num_questions} UNIQUE fill-in-the-blank sentences now!"""
+
+                print(f"📤 Sending FILL-IN-BLANK request to Gemini (Retry {retry_attempt + 1}/{MAX_RETRIES})...")
+                full_prompt = (
+                    f"System: You are a creative fill-in-the-blank question generator. "
+                    f"Generate UNIQUE sentence-completion exercises. Attempt: #{attempt}\n\n"
+                    f"User: {prompt}"
+                )
+                gemini_response = gemini_model.generate_content(full_prompt)
+                raw_text = gemini_response.text.strip()
+
+                # Clean markdown fences
+                if raw_text.startswith("```json"):
+                    raw_text = raw_text[7:]
+                if raw_text.startswith("```"):
+                    raw_text = raw_text[3:]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3]
+                raw_text = raw_text.strip()
+
+                start = raw_text.find("[")
+                end = raw_text.rfind("]") + 1
+                if start == -1 or end == 0:
+                    raise ValueError("No JSON array found in response")
+
+                json_text = raw_text[start:end]
+                questions = json.loads(json_text)
+
+                if not isinstance(questions, list) or len(questions) == 0:
+                    raise ValueError("Invalid question format")
+
+                # Validate fill-in-blank fields (no "options" required)
+                for q in questions:
+                    if not all(key in q for key in ["question", "correct_answer"]):
+                        raise ValueError("Missing required fields in fill-in-blank question")
+                    if "____" not in q["question"]:
+                        raise ValueError("Fill-in-blank question must contain '____'")
+
+                # Cache the question texts to avoid future repetition
+                new_question_texts = [q["question"] for q in questions]
+                recent_questions_cache[cache_key] = previous_questions + new_question_texts
+
+                print(f"✅ Successfully generated {len(questions)} fill-in-blank questions!")
+                return {
+                    "questions": questions,
+                    "topic": topic,
+                    "attempt": attempt,
+                    "style": "Fill in the Blank",
+                    "difficulty": selected_difficulty['level'],
+                    "message": f"Generated {len(questions)} fill-in-the-blank questions"
+                }
+
+            else:
+                # ── MULTIPLE CHOICE PROMPT (existing logic, completely unchanged) ──
+                prompt = f"""🎯 QUIZ GENERATION REQUEST #{attempt}
 
 **TOPIC:** {topic}
 
@@ -437,71 +634,72 @@ Return ONLY a valid JSON array (no markdown, no extra text):
 
 🚀 Begin generating {num_questions} UNIQUE {selected_type['style'].lower()} questions now!"""
 
-            print(f"📤 Sending request to Gemini (Retry {retry_attempt + 1}/{MAX_RETRIES})...")
-            print(f"   Type: {selected_type['style']}")
-            print(f"   Difficulty: {selected_difficulty['level']}")
-            print(f"   Focus: {', '.join(selected_focuses)}")
-            print(f"   Previous questions to avoid: {len(previous_questions)}")
+                print(f"📤 Sending request to Gemini (Retry {retry_attempt + 1}/{MAX_RETRIES})...")
+                print(f"   Type: {selected_type['style']}")
+                print(f"   Difficulty: {selected_difficulty['level']}")
+                print(f"   Focus: {', '.join(selected_focuses)}")
+                print(f"   Previous questions to avoid: {len(previous_questions)}")
 
-            full_prompt = (
-                f"System: You are a creative quiz generator. Generate UNIQUE questions that are "
-                f"different from previous attempts. Current attempt: #{attempt}. Style: {selected_type['style']}\n\n"
-                f"User: {prompt}"
-            )
-            gemini_response = gemini_model.generate_content(full_prompt)
-            raw_text = gemini_response.text.strip()
-            
-            # Clean up response
-            if raw_text.startswith("```json"):
-                raw_text = raw_text[7:]
-            if raw_text.startswith("```"):
-                raw_text = raw_text[3:]
-            if raw_text.endswith("```"):
-                raw_text = raw_text[:-3]
-            raw_text = raw_text.strip()
-            
-            # Extract JSON array
-            start = raw_text.find("[")
-            end = raw_text.rfind("]") + 1
-            
-            if start == -1 or end == 0:
-                raise ValueError("No JSON array found in response")
-            
-            json_text = raw_text[start:end]
-            questions = json.loads(json_text)
-            
-            if not isinstance(questions, list) or len(questions) == 0:
-                raise ValueError("Invalid question format")
-            
-            # Validate questions
-            for q in questions:
-                if not all(key in q for key in ["question", "options", "correct_answer"]):
-                    raise ValueError("Missing required fields in question")
-                if len(q["options"]) != 4:
-                    raise ValueError("Each question must have exactly 4 options")
-            
-            # ✅ SAVE QUESTIONS TO CACHE (to avoid repetition)
-            new_question_texts = [q["question"] for q in questions]
-            recent_questions_cache[cache_key] = previous_questions + new_question_texts
-            
-            print(f"✅ Successfully generated {len(questions)} UNIQUE questions!")
-            print(f"   Style: {selected_type['style']}")
-            print(f"   Difficulty: {selected_difficulty['level']}")
-            print(f"   Total questions in cache: {len(recent_questions_cache[cache_key])}")
-            print(f"{'='*70}\n")
-            
-            # Preview first question
-            if questions:
-                print(f"📝 Sample question: {questions[0]['question'][:80]}...")
-            
-            return {
-                "questions": questions,
-                "topic": topic,
-                "attempt": attempt,
-                "style": selected_type['style'],
-                "difficulty": selected_difficulty['level'],
-                "message": f"Generated {len(questions)} unique questions using {selected_type['style']} approach"
-            }
+                full_prompt = (
+                    f"System: You are a creative quiz generator. Generate UNIQUE questions that are "
+                    f"different from previous attempts. Current attempt: #{attempt}. Style: {selected_type['style']}\n\n"
+                    f"User: {prompt}"
+                )
+                gemini_response = gemini_model.generate_content(full_prompt)
+                raw_text = gemini_response.text.strip()
+                
+                # Clean up response
+                if raw_text.startswith("```json"):
+                    raw_text = raw_text[7:]
+                if raw_text.startswith("```"):
+                    raw_text = raw_text[3:]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3]
+                raw_text = raw_text.strip()
+                
+                # Extract JSON array
+                start = raw_text.find("[")
+                end = raw_text.rfind("]") + 1
+                
+                if start == -1 or end == 0:
+                    raise ValueError("No JSON array found in response")
+                
+                json_text = raw_text[start:end]
+                questions = json.loads(json_text)
+                
+                if not isinstance(questions, list) or len(questions) == 0:
+                    raise ValueError("Invalid question format")
+                
+                # Validate questions
+                for q in questions:
+                    if not all(key in q for key in ["question", "options", "correct_answer"]):
+                        raise ValueError("Missing required fields in question")
+                    if len(q["options"]) != 4:
+                        raise ValueError("Each question must have exactly 4 options")
+                
+                # ✅ SAVE QUESTIONS TO CACHE (to avoid repetition)
+                new_question_texts = [q["question"] for q in questions]
+                recent_questions_cache[cache_key] = previous_questions + new_question_texts
+                
+                print(f"✅ Successfully generated {len(questions)} UNIQUE questions!")
+                print(f"   Style: {selected_type['style']}")
+                print(f"   Difficulty: {selected_difficulty['level']}")
+                print(f"   Total questions in cache: {len(recent_questions_cache[cache_key])}")
+                print(f"{'='*70}\n")
+                
+                # Preview first question
+                if questions:
+                    print(f"📝 Sample question: {questions[0]['question'][:80]}...")
+                
+                return {
+                    "questions": questions,
+                    "topic": topic,
+                    "attempt": attempt,
+                    "style": selected_type['style'],
+                    "difficulty": selected_difficulty['level'],
+                    "message": f"Generated {len(questions)} unique questions using {selected_type['style']} approach"
+                }
+
             
         except json.JSONDecodeError as e:
             print(f"❌ Retry {retry_attempt + 1} - JSON parse error: {str(e)}")
@@ -575,21 +773,44 @@ Guidelines:
    - NEVER include code for topics that are not fundamentally about programming or software. This includes — but is not limited to — science (biology, physics, chemistry, general science), history, mathematics concepts, geography, social studies, philosophy, arts, or any general knowledge topic, even if a programming analogy *could* be drawn. Do NOT introduce programming analogies with code in these cases.
    - Also do NOT include code for topics that are merely adjacent to technology (like "AI news", "what companies use AI", "how does the internet work conceptually").
    - When in doubt about whether the topic is truly a programming/CS topic, default to NO code.
-5. **When code IS included**, keep it short (one clear example), correctly tagged with the right language (e.g. \`\`\`python), and directly relevant to the specific question — never a generic/unrelated placeholder.
+5. **When code IS included**, keep it short (one clear example), correctly tagged with the right language (e.g. ```python), and directly relevant to the specific question — never a generic/unrelated placeholder.
 6. **Be beginner-friendly.** Use simple analogies for complex topics. Avoid jargon without explanation.
 7. **Friendly but professional tone** — supportive and encouraging, while maintaining the authority of a real expert.
+8. **Contextual awareness for follow-ups:** Interpret ambiguous or short follow-up questions (such as "tell me more", "tell me more about it", "why is he famous", "why", "how so", "what about X", "explain further") strictly in the context of the immediately preceding conversation turns. Never treat follow-up questions as standalone topics or idiom explanations unless explicitly asked about idioms.
 
 If you don't know the answer, say so honestly and suggest related topics to explore."""
 
         # Trim conversation history to last 6 messages to reduce token usage
         recent_history = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
 
-        # Retrieve web search context (RAG step — unchanged)
-        search_results = retrieve_context(question)
+        # Construct context-aware search query for follow-up questions
+        user_messages = [
+            msg["content"].strip()
+            for msg in conversation_history
+            if isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and msg.get("content", "").strip() != ""
+        ]
+        prior_user_questions = [q for q in user_messages if q.lower() != question.strip().lower()]
+        
+        # Determine if current question is a follow-up or ambiguous query
+        question_words = question.strip().lower().split()
+        followup_indicators = {"it", "that", "he", "she", "they", "this", "them", "his", "her", "its", "more", "why", "how", "who", "which", "where", "explain"}
+        is_followup = (len(question_words) < 8) or any(w.strip("?,.!") in followup_indicators for w in question_words)
+
+        if prior_user_questions and is_followup:
+            last_prior_question = prior_user_questions[-1]
+            search_query = f"{last_prior_question} {question.strip()}"
+            print(f"💡 Contextual search query formulated: '{search_query}' (from prior question: '{last_prior_question}')")
+        else:
+            search_query = question.strip()
+
+        # Retrieve web search context using context-aware search query
+        search_results = retrieve_context(search_query)
 
         if search_results:
             search_context_str = "\n\n".join(search_results)
-            formatted_question = f"Using the following current information:\n{search_context_str}\n\nExplain {question} to a beginner. If the search results don't add anything beyond general knowledge, rely on your own understanding."
+            formatted_question = f"Using the following current information:\n{search_context_str}\n\nUser Question: {question}\nIf the search results don't add anything beyond general knowledge, rely on your own understanding and the preceding conversation context."
             print("📝 Applied RAG prompt template with retrieved search results.")
         else:
             formatted_question = question

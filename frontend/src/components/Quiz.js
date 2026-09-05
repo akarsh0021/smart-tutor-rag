@@ -4,16 +4,20 @@ import { ArrowLeft, BookOpen, CheckCircle, XCircle, RefreshCcw, Send, Award, Bra
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
-function Quiz({ topic, user, onBackToTutor, onLogout }) {
+function Quiz({ topic, numQuestions = 5, questionType = "multiple_choice", user, onBackToTutor, onLogout }) {
   const [questions, setQuestions] = useState([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState("");
+  const [fillAnswer, setFillAnswer] = useState("");
   const [userAnswers, setUserAnswers] = useState([]);
   const [showResults, setShowResults] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [score, setScore] = useState(0);
   const [feedback, setFeedback] = useState("");
+  const [difficulty, setDifficulty] = useState("Easy");
+
+  const isFill = questionType === "fill_in_blank";
 
   const generateQuiz = useCallback(async () => {
     setLoading(true);
@@ -25,16 +29,24 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
     setScore(0);
     setFeedback("");
     setSelectedAnswer("");
+    setFillAnswer("");
 
     try {
       const response = await fetch(`${API_BASE_URL}/ai-questions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, num_questions: 5, force_new: true }),
+        body: JSON.stringify({
+          topic,
+          num_questions: numQuestions,
+          force_new: true,
+          question_type: questionType,
+          user_id: user?.id ?? null,
+        }),
       });
       const data = await response.json();
       if (response.ok && data.questions?.length > 0) {
         setQuestions(data.questions);
+        setDifficulty(data.difficulty || "Easy");
       } else {
         setError("Failed to generate quiz. System might be busy.");
       }
@@ -43,17 +55,19 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
     } finally {
       setLoading(false);
     }
-  }, [topic]);
+  }, [topic, numQuestions, questionType, user]);
 
   useEffect(() => {
     if (topic) generateQuiz();
   }, [topic, generateQuiz]);
 
   const handleNextQuestion = () => {
+    const answer = isFill ? fillAnswer : selectedAnswer;
     const newAnswers = [...userAnswers];
-    newAnswers[currentQuestionIndex] = selectedAnswer;
+    newAnswers[currentQuestionIndex] = answer;
     setUserAnswers(newAnswers);
     setSelectedAnswer("");
+    setFillAnswer("");
 
     if (currentQuestionIndex < questions.length - 1) {
       setCurrentQuestionIndex(currentQuestionIndex + 1);
@@ -64,9 +78,33 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
 
   const calculateResult = async (answers) => {
     let correctCount = 0;
-    questions.forEach((q, i) => { if (answers[i] === q.correct_answer) correctCount++; });
+    questions.forEach((q, i) => {
+      if (isFill) {
+        if ((answers[i] || "").trim().toLowerCase() === (q.correct_answer || "").trim().toLowerCase()) {
+          correctCount++;
+        }
+      } else {
+        if (answers[i] === q.correct_answer) correctCount++;
+      }
+    });
     setScore(correctCount);
     setShowResults(true);
+
+    // Submit quiz result for adaptive difficulty (fire-and-forget)
+    if (user?.id) {
+      fetch(`${API_BASE_URL}/submit-quiz-result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: user.id,
+          topic,
+          question_type: questionType,
+          difficulty,
+          score: correctCount,
+          total: questions.length,
+        }),
+      }).catch(() => {/* non-critical — ignore failures */});
+    }
 
     try {
       const res = await fetch("http://localhost:8000/quiz-feedback", {
@@ -132,20 +170,25 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
               <BookOpen className="text-indigo-400" /> Assessment Review
             </h3>
             <div className="grid gap-4">
-              {questions.map((q, i) => (
-                <div key={i} className="p-6 bg-slate-900/40 border border-white/5 rounded-2xl flex gap-6 items-start">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${userAnswers[i] === q.correct_answer ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-100"}`}>
-                    {userAnswers[i] === q.correct_answer ? <CheckCircle size={24} /> : <XCircle size={24} />}
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-white font-bold mb-2">Q{i+1}: {q.question}</p>
-                    <div className="flex items-center gap-4 text-sm">
-                      <span className="text-slate-500 font-medium">Your selection: <span className={userAnswers[i] === q.correct_answer ? "text-green-400" : "text-red-400"}>{userAnswers[i] || "Skipped"}</span></span>
-                      {userAnswers[i] !== q.correct_answer && <span className="text-green-400 font-medium">Correct: {q.correct_answer}</span>}
+              {questions.map((q, i) => {
+                const isCorrect = isFill
+                  ? (userAnswers[i] || "").trim().toLowerCase() === (q.correct_answer || "").trim().toLowerCase()
+                  : userAnswers[i] === q.correct_answer;
+                return (
+                  <div key={i} className="p-6 bg-slate-900/40 border border-white/5 rounded-2xl flex gap-6 items-start">
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${isCorrect ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-100"}`}>
+                      {isCorrect ? <CheckCircle size={24} /> : <XCircle size={24} />}
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-white font-bold mb-2">Q{i+1}: {q.question}</p>
+                      <div className="flex items-center gap-4 text-sm">
+                        <span className="text-slate-500 font-medium">Your answer: <span className={isCorrect ? "text-green-400" : "text-red-400"}>{userAnswers[i] || "Skipped"}</span></span>
+                        {!isCorrect && <span className="text-green-400 font-medium">Correct: {q.correct_answer}</span>}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -166,9 +209,19 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
       <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="glass-card rounded-[3rem] p-12 relative overflow-hidden">
         <div className="flex justify-between items-center mb-10">
           <button onClick={onBackToTutor} className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors font-bold">
-            <ArrowLeft size={18} /> Exit Quiz
+            <ArrowLeft size={18} /> Exit {isFill ? "Blanks" : "Quiz"}
           </button>
           <div className="flex items-center gap-4">
+            {/* Difficulty badge */}
+            <span className={`px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest border ${
+              difficulty === "Hard"
+                ? "bg-red-500/10 border-red-500/30 text-red-400"
+                : difficulty === "Medium"
+                ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                : "bg-green-500/10 border-green-500/30 text-green-400"
+            }`}>
+              {difficulty}
+            </span>
             <span className="text-sm font-black text-slate-500 tracking-widest uppercase">Question {currentQuestionIndex + 1}/{questions.length}</span>
             <div className="w-32 h-2 bg-slate-800 rounded-full overflow-hidden">
               <motion.div 
@@ -184,32 +237,51 @@ function Quiz({ topic, user, onBackToTutor, onLogout }) {
           {currentQ.question}
         </h2>
 
-        <div className="grid gap-4 mb-12">
-          {currentQ.options.map((opt, i) => (
-            <motion.button
-              key={i}
-              whileHover={{ x: 10 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={() => setSelectedAnswer(opt)}
-              className={`w-full p-6 rounded-2xl text-left border transition-all text-lg font-bold flex items-center gap-4 group ${
-                selectedAnswer === opt 
-                  ? "bg-indigo-600 border-indigo-500 text-white shadow-xl shadow-indigo-600/20" 
-                  : "bg-slate-900/40 border-white/5 text-slate-300 hover:bg-slate-800 hover:border-white/10"
-              }`}
-            >
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-sm ${
-                selectedAnswer === opt ? "bg-white/20 text-white" : "bg-slate-800 text-slate-500"
-              }`}>
-                {String.fromCharCode(65 + i)}
-              </div>
-              {opt}
-            </motion.button>
-          ))}
-        </div>
+        {isFill ? (
+          /* ── Fill in the Blank answer input ── */
+          <div className="mb-12">
+            <label className="block text-sm font-bold text-teal-300 mb-3 uppercase tracking-wider">
+              Your Answer
+            </label>
+            <input
+              type="text"
+              value={fillAnswer}
+              onChange={(e) => setFillAnswer(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && fillAnswer.trim() && handleNextQuestion()}
+              placeholder="Type the missing word or phrase…"
+              className="w-full bg-slate-900 border border-teal-500/30 focus:border-teal-400 rounded-2xl px-6 py-5 text-white text-lg font-semibold outline-none placeholder:text-slate-600 transition-colors"
+              autoFocus
+            />
+          </div>
+        ) : (
+          /* ── Multiple-choice option buttons (unchanged) ── */
+          <div className="grid gap-4 mb-12">
+            {currentQ.options.map((opt, i) => (
+              <motion.button
+                key={i}
+                whileHover={{ x: 10 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => setSelectedAnswer(opt)}
+                className={`w-full p-6 rounded-2xl text-left border transition-all text-lg font-bold flex items-center gap-4 group ${
+                  selectedAnswer === opt 
+                    ? "bg-indigo-600 border-indigo-500 text-white shadow-xl shadow-indigo-600/20" 
+                    : "bg-slate-900/40 border-white/5 text-slate-300 hover:bg-slate-800 hover:border-white/10"
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-sm ${
+                  selectedAnswer === opt ? "bg-white/20 text-white" : "bg-slate-800 text-slate-500"
+                }`}>
+                  {String.fromCharCode(65 + i)}
+                </div>
+                {opt}
+              </motion.button>
+            ))}
+          </div>
+        )}
 
         <button 
           onClick={handleNextQuestion} 
-          disabled={!selectedAnswer}
+          disabled={isFill ? !fillAnswer.trim() : !selectedAnswer}
           className="w-full btn-accent py-5 text-xl flex items-center justify-center gap-4 group disabled:opacity-20"
         >
           {currentQuestionIndex < questions.length - 1 ? "Proceed to Next" : "Finalize Assessment"}

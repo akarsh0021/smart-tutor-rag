@@ -1,22 +1,27 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, LogOut, BookOpen, User, Bot, Sparkles, Brain } from "lucide-react";
+import { Send, LogOut, BookOpen, User, Bot, Sparkles, Brain, PenLine } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
-function AITutor({ onSelectTopic, user, onLogout }) {
-  const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      content: `Welcome **${user.name || user.username}**! 👋\n\nI’m your expert AI Tutor. How can I help you today?`,
-    },
-  ]);
-
+function AITutor({ onSelectTopic, user, onLogout, messages = [], setMessages }) {
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
-  const [currentTopic, setCurrentTopic] = useState("");
+  const [showQuizModal, setShowQuizModal] = useState(false);
+  const [selectedCount, setSelectedCount] = useState(5);
+  const [showFillModal, setShowFillModal] = useState(false);
+  const [selectedFillCount, setSelectedFillCount] = useState(5);
   const messagesEndRef = useRef(null);
+
+  const currentTopic = [...messages].reverse().find((m) => m.role === "user")?.content || "";
+
+  const clampCount = (val) => {
+    const parsed = parseInt(val, 10);
+    if (isNaN(parsed) || parsed < 3) return 3;
+    if (parsed > 15) return 15;
+    return parsed;
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -27,7 +32,8 @@ function AITutor({ onSelectTopic, user, onLogout }) {
 
     const userMessage = inputValue.trim();
     setInputValue("");
-    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    const updatedMessages = [...messages, { role: "user", content: userMessage }];
+    setMessages(updatedMessages);
     setLoading(true);
 
     try {
@@ -36,14 +42,13 @@ function AITutor({ onSelectTopic, user, onLogout }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: userMessage,
-          conversation_history: messages,
+          conversation_history: updatedMessages,
         }),
       });
 
       const data = await response.json();
       if (response.ok) {
         setMessages((prev) => [...prev, { role: "assistant", content: data.answer }]);
-        setCurrentTopic(userMessage);
       } else {
         throw new Error();
       }
@@ -55,7 +60,7 @@ function AITutor({ onSelectTopic, user, onLogout }) {
   };
 
   return (
-    <div className="w-full max-w-[1700px] h-[88vh] min-h-[700px] flex gap-6">
+    <div className="w-full max-w-[1700px] h-[88vh] min-h-[700px] flex gap-6 relative">
       {/* Sidebar */}
       <aside className="w-80 glass-card rounded-[2.5rem] p-8 flex flex-col relative overflow-hidden">
         <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-amber-500"></div>
@@ -83,11 +88,24 @@ function AITutor({ onSelectTopic, user, onLogout }) {
             <motion.button
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
-              onClick={() => onSelectTopic(currentTopic)}
+              onClick={() => setShowQuizModal(true)}
               className="w-full btn-accent flex items-center justify-center gap-3 group relative overflow-hidden"
             >
               <BookOpen size={20} className="group-hover:rotate-12 transition-transform" />
               <span className="relative z-10">Generate Quiz</span>
+            </motion.button>
+          )}
+
+          {currentTopic && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.05 }}
+              onClick={() => setShowFillModal(true)}
+              className="w-full flex items-center justify-center gap-3 group relative overflow-hidden py-3 px-5 rounded-2xl font-semibold text-sm bg-teal-500/10 border border-teal-500/20 text-teal-300 hover:bg-teal-500/20 hover:border-teal-400/40 transition-all"
+            >
+              <PenLine size={20} className="group-hover:rotate-12 transition-transform" />
+              <span className="relative z-10">Fill in the Blanks</span>
             </motion.button>
           )}
         </div>
@@ -223,6 +241,194 @@ function AITutor({ onSelectTopic, user, onLogout }) {
           </div>
         </div>
       </main>
+
+      {/* Quiz Configuration Modal */}
+      <AnimatePresence>
+        {showQuizModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="glass-card w-full max-w-md p-8 rounded-[2.5rem] relative border border-white/10 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white">
+                    <Brain size={22} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Quiz Settings</h3>
+                    <p className="text-xs text-slate-400">Select Question Count</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowQuizModal(false)}
+                  className="text-slate-400 hover:text-white p-2 rounded-lg transition-colors font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="mb-6 p-4 bg-white/5 border border-white/5 rounded-2xl">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Target Topic</p>
+                <p className="text-sm font-bold text-slate-200 truncate">{currentTopic}</p>
+              </div>
+
+              <div className="space-y-4 mb-8">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                  Question Count (Range: 3 – 15)
+                </label>
+                
+                {/* Quick Select Buttons */}
+                <div className="grid grid-cols-4 gap-2">
+                  {[3, 5, 10, 15].map((count) => (
+                    <button
+                      key={count}
+                      type="button"
+                      onClick={() => setSelectedCount(count)}
+                      className={`py-3 rounded-xl text-sm font-bold border transition-all ${
+                        selectedCount === count
+                          ? "bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-600/30"
+                          : "bg-slate-900/50 border-white/5 text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      {count} Qs
+                    </button>
+                  ))}
+                </div>
+
+                {/* Custom Number Input */}
+                <div className="flex items-center gap-3 pt-2">
+                  <span className="text-xs font-semibold text-slate-400 shrink-0">Custom Count:</span>
+                  <input
+                    type="number"
+                    min={3}
+                    max={15}
+                    value={selectedCount}
+                    onChange={(e) => setSelectedCount(e.target.value === "" ? "" : clampCount(e.target.value))}
+                    onBlur={() => setSelectedCount((prev) => clampCount(prev))}
+                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-white font-bold outline-none focus:border-indigo-500 text-center"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowQuizModal(false)}
+                  className="btn-secondary flex-1 py-3 text-sm font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const validated = clampCount(selectedCount);
+                    setShowQuizModal(false);
+                    onSelectTopic(currentTopic, validated);
+                  }}
+                  className="btn-accent flex-1 py-3 text-sm font-bold flex items-center justify-center gap-2"
+                >
+                  Start Assessment ({clampCount(selectedCount)})
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Fill in the Blanks Modal */}
+      <AnimatePresence>
+        {showFillModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="glass-card w-full max-w-md p-8 rounded-[2.5rem] relative border border-teal-500/20 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-teal-600/30 border border-teal-500/30 rounded-xl flex items-center justify-center text-teal-300">
+                    <PenLine size={22} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Fill in the Blanks</h3>
+                    <p className="text-xs text-slate-400">Select Number of Blanks</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowFillModal(false)}
+                  className="text-slate-400 hover:text-white p-2 rounded-lg transition-colors font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="mb-6 p-4 bg-white/5 border border-white/5 rounded-2xl">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Target Topic</p>
+                <p className="text-sm font-bold text-slate-200 truncate">{currentTopic}</p>
+              </div>
+
+              <div className="space-y-4 mb-8">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                  Blank Count (Range: 3 – 15)
+                </label>
+
+                {/* Quick Select Buttons */}
+                <div className="grid grid-cols-4 gap-2">
+                  {[3, 5, 10, 15].map((count) => (
+                    <button
+                      key={count}
+                      type="button"
+                      onClick={() => setSelectedFillCount(count)}
+                      className={`py-3 rounded-xl text-sm font-bold border transition-all ${
+                        selectedFillCount === count
+                          ? "bg-teal-600 border-teal-500 text-white shadow-lg shadow-teal-600/30"
+                          : "bg-slate-900/50 border-white/5 text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      {count} Qs
+                    </button>
+                  ))}
+                </div>
+
+                {/* Custom Number Input */}
+                <div className="flex items-center gap-3 pt-2">
+                  <span className="text-xs font-semibold text-slate-400 shrink-0">Custom Count:</span>
+                  <input
+                    type="number"
+                    min={3}
+                    max={15}
+                    value={selectedFillCount}
+                    onChange={(e) => setSelectedFillCount(e.target.value === "" ? "" : clampCount(e.target.value))}
+                    onBlur={() => setSelectedFillCount((prev) => clampCount(prev))}
+                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-2 text-white font-bold outline-none focus:border-teal-500 text-center"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowFillModal(false)}
+                  className="btn-secondary flex-1 py-3 text-sm font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const validated = clampCount(selectedFillCount);
+                    setShowFillModal(false);
+                    onSelectTopic(currentTopic, validated, "fill_in_blank");
+                  }}
+                  className="flex-1 py-3 text-sm font-bold rounded-2xl bg-teal-600 hover:bg-teal-500 text-white transition-all flex items-center justify-center gap-2 shadow-lg shadow-teal-600/20"
+                >
+                  Start ({clampCount(selectedFillCount)} Blanks)
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
